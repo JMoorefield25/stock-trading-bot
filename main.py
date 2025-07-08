@@ -1,91 +1,65 @@
-import os
-import alpaca_trade_api as tradeapi
 import time
-import datetime
 import requests
+from alpaca_trade_api.rest import REST, TimeFrame
 
-# 🔐 Load credentials from environment variables (safe for Railway)
-API_KEY = os.getenv('API_KEY')
-API_SECRET = os.getenv('API_SECRET')
-BASE_URL = 'https://paper-api.alpaca.markets'
+# 🔑 Alpaca and Telegram Credentials
+API_KEY = "PKYUV28LDGQWXGMZ7OGM"
+API_SECRET = "MGKIxVzlI1h1WCwffA18Up9RScNgimLhR7nPx3Sd"
+TELEGRAM_BOT_TOKEN = "7560329215:AAHHZ2N-T5XSa0RGknRi9m_2QioGF7icga8"
+CHAT_ID = "7126195607"
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-CHAT_ID = os.getenv('CHAT_ID')
+# 🔌 Connect to Alpaca paper trading API
+api = REST(API_KEY, API_SECRET, base_url="https://paper-api.alpaca.markets")
 
-# ⚙️ BOT SETTINGS
-symbol = "AAPL"          # ← You can change this to "TSLA", "MSFT", etc.
-qty = 1                  # Number of shares per trade
-short_window = 20        # Short moving average
-long_window = 50         # Long moving average
-risk_limit_pct = 0.03    # 3% stop loss
-profit_target_pct = 0.05 # 5% take profit
-check_interval = 60      # Check every 60 seconds
-
-# ✅ SETUP ALPACA API
-api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
-
+# 📲 Function to send Telegram messages
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message}
-    requests.post(url, data=payload)
+    response = requests.post(url, data=payload)
+    print("Telegram Response:", response.json())
 
-def get_price_data():
-    bars = api.get_bars(symbol, '1Min', limit=long_window)
-    return [bar.c for bar in bars]
-
-def calculate_moving_averages(prices):
-    short_ma = sum(prices[-short_window:]) / short_window
-    long_ma = sum(prices[-long_window:]) / long_window
+# 📊 Get moving averages
+def get_moving_averages(symbol, short_window=5, long_window=20):
+    bars = api.get_bars(symbol, TimeFrame.Minute, limit=long_window).df
+    short_ma = bars['close'][-short_window:].mean()
+    long_ma = bars['close'][-long_window:].mean()
     return short_ma, long_ma
 
-def get_position():
-    try:
-        pos = api.get_position(symbol)
-        return float(pos.qty), float(pos.avg_entry_price)
-    except:
-        return 0, 0
+# 🔁 Main trading logic
+def trade_logic(symbol):
+    position = None
 
-def place_order(side):
-    try:
-        api.submit_order(
-            symbol=symbol,
-            qty=qty,
-            side=side,
-            type='market',
-            time_in_force='gtc'
-        )
-        send_telegram_message(f"{datetime.datetime.now()}: {side.upper()} order placed for {qty} share(s) of {symbol}.")
-    except Exception as e:
-        send_telegram_message(f"Order failed: {e}")
+    while True:
+        try:
+            short_ma, long_ma = get_moving_averages(symbol)
+            last_price = api.get_latest_trade(symbol).price
+            print(f"{symbol} | Price: {last_price} | Short MA: {short_ma} | Long MA: {long_ma}")
 
-def strategy():
-    prices = get_price_data()
-    if len(prices) < long_window:
-        print("Waiting for enough data...")
-        return
+            if short_ma > long_ma and position != "long":
+                api.submit_order(symbol=symbol, qty=1, side="buy", type="market", time_in_force="gtc")
+                send_telegram_message(f"📈 Bought 1 share of {symbol} at ${last_price}")
+                position = "long"
 
-    short_ma, long_ma = calculate_moving_averages(prices)
-    current_price = prices[-1]
-    position_qty, avg_price = get_position()
+            elif short_ma < long_ma and position != "short":
+                # ✅ Check position before trying to sell
+                try:
+                    pos = api.get_position(symbol)
+                    if int(pos.qty) >= 1:
+                        api.submit_order(symbol=symbol, qty=1, side="sell", type="market", time_in_force="gtc")
+                        send_telegram_message(f"📉 Sold 1 share of {symbol} at ${last_price}")
+                        position = "short"
+                    else:
+                        send_telegram_message(f"⚠️ Skipped selling {symbol} — no shares owned.")
+                except:
+                    send_telegram_message(f"⚠️ Skipped selling {symbol} — no position found.")
 
-    print(f"{datetime.datetime.now()} | {symbol} | Price: {current_price:.2f} | Short MA: {short_ma:.2f} | Long MA: {long_ma:.2f}")
+        except Exception as e:
+            print("Error:", e)
+            send_telegram_message(f"❌ Error: {e}")
 
-    if short_ma > long_ma and position_qty == 0:
-        place_order('buy')
+        time.sleep(60)
 
-    elif position_qty > 0:
-        gain_pct = (current_price - avg_price) / avg_price
-        gain_dollars = (current_price - avg_price) * qty
-
-        if gain_pct >= profit_target_pct:
-            send_telegram_message(f"💰 Profit target hit: {gain_pct:.2%} (${gain_dollars:.2f}) — selling {qty} share(s) of {symbol}.")
-            place_order('sell')
-
-        elif gain_pct <= -risk_limit_pct:
-            send_telegram_message(f"🔻 Stop loss hit: {gain_pct:.2%} (${gain_dollars:.2f}) — selling {qty} share(s) of {symbol}.")
-            place_order('sell')
-
-# 🔁 RUN LOOP
-while True:
-    strategy()
-    time.sleep(check_interval)
+# 🚀 Start the bot
+if __name__ == "__main__":
+    send_telegram_message("✅ Bot started successfully and is now running.")
+    trade_logic("AAPL")  # Change symbol if you want to trade another stock
